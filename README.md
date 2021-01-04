@@ -1,5 +1,8 @@
 ## grblHAL ##
 
+# Branch for testing spindle sync on STM32F411 nucleoboard.
+# Don't use this brach, use the orininal
+
 grblHAL has [many extensions](https://github.com/terjeio/grblHAL/wiki) that may cause issues with some senders. As a workaround for these a [compile time option](https://github.com/terjeio/grblHAL/wiki/Changes-from-grbl-1.1#workaround) has been added that disables extensions selectively. 
 
 Windows users may try [ioSender](https://github.com/terjeio/Grbl-GCode-Sender), binary releases can be found [here](https://github.com/terjeio/Grbl-GCode-Sender/releases).

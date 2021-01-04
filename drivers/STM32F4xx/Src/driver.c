@@ -703,20 +703,21 @@ static void spindlePulseOn (uint_fast16_t pulse_length)
 static spindle_data_t spindleGetData (spindle_data_request_t request)
 {
     bool stopped;
+	__disable_irq();	// these values should be read simultaneously without interuption
     uint32_t pulse_length = spindle_encoder.timer.pulse_length / spindle_encoder.counter.tics_per_irq;
-
     uint32_t rpm_timer_delta = RPM_TIMER->CNT - spindle_encoder.timer.last_pulse;
+	__enable_irq();
 
     // If no (4) spindle pulses during last 250 ms assume RPM is 0
     if((stopped = ((pulse_length == 0) || (rpm_timer_delta > spindle_encoder.maximum_tt)))) {
         spindle_data.rpm = 0.0f;
-        rpm_timer_delta = ((uint16_t)RPM_COUNTER->CNT - (uint16_t)spindle_encoder.counter.last_count) * pulse_length;
+        rpm_timer_delta = (RPM_COUNTER->CNT - spindle_encoder.counter.last_count) * pulse_length;
     }
 
     switch(request) {
 
         case SpindleData_Counters:
-            spindle_data.pulse_count += (uint16_t)RPM_COUNTER->CNT - (uint16_t)spindle_encoder.counter.last_count;
+            spindle_data.pulse_count += RPM_COUNTER->CNT - spindle_encoder.counter.last_count;
             break;
 
         case SpindleData_RPM:
@@ -726,7 +727,7 @@ static spindle_data_t spindleGetData (spindle_data_request_t request)
 
         case SpindleData_AngularPosition:
             spindle_data.angular_position = (float)spindle_data.index_count +
-                    ((float)((uint16_t)spindle_encoder.counter.last_count - (uint16_t)spindle_encoder.counter.last_index) +
+                    ((float)(spindle_encoder.counter.last_count - spindle_encoder.counter.last_index) +
                               (pulse_length == 0 ? 0.0f : (float)rpm_timer_delta / (float)pulse_length)) *
                                 spindle_encoder.pulse_distance;
             break;
@@ -1328,7 +1329,7 @@ static bool driver_setup (settings_t *settings)
 
     GPIO_Init.Mode = GPIO_MODE_AF_PP;
     GPIO_Init.Pin = SPINDLE_PULSE_BIT;
-    GPIO_Init.Pull = GPIO_NOPULL;
+    GPIO_Init.Pull = GPIO_PULLUP;
     GPIO_Init.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_Init.Alternate = GPIO_AF2_TIM3;
     HAL_GPIO_Init(SPINDLE_PULSE_PORT, &GPIO_Init);
@@ -1570,8 +1571,10 @@ void PPI_TIMER_IRQHandler (void)
 
 void RPM_COUNTER_IRQHandler (void)
 {
+	__disable_irq();	// these values should be read simultaneously without interuption
     uint32_t tval = RPM_TIMER->CNT;
-    uint16_t cval = RPM_COUNTER->CNT;
+    uint32_t cval = RPM_COUNTER->CNT;
+    __enable_irq();
 
     RPM_COUNTER->SR = ~TIM_SR_CC1IF;
     RPM_COUNTER->CCR1 += spindle_encoder.counter.tics_per_irq;
