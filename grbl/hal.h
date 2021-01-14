@@ -304,6 +304,9 @@ typedef struct {
     // driver capabilities flags
     driver_cap_t driver_cap;
 
+    void (*CalculateFeedSynchronization)(void);
+    bool SynchronizeFeedRate;
+
 } grbl_hal_t;
 
 // TODO: move the following structs to grbl.h?

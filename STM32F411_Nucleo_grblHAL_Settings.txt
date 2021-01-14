@@ -1,3 +1,6 @@
+; most stable settings at 180 RPM
+; at 80 RPM irratic behaviour of stepper speed
+; results in hang/not respinding to G33 anymore 
 $0=10.0
 $1=25
 $2=0
@@ -52,10 +55,10 @@ $62=0
 $63=2
 $64=0
 $65=0
-$90=0.000
-$91=0.000
+$90=0.900
+$91=0.900
 $92=0.000
-$95=0.000
+$95=0.900
 $100=800.000
 $101=8.889
 $102=1600.000

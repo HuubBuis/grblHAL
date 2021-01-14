@@ -269,7 +269,7 @@ static void stepperGoIdle (bool clear_signals)
 // Sets up stepper driver interrupt timeout, "Normal" version
 static void stepperCyclesPerTick (uint32_t cycles_per_tick)
 {
-    STEPPER_TIMER->ARR = cycles_per_tick < (1UL << 20) ? cycles_per_tick : 0x000FFFFFUL;
+    STEPPER_TIMER->ARR = cycles_per_tick < (1UL << 30) ? cycles_per_tick : (1UL << 30);
     STEPPER_TIMER->EGR = TIM_EGR_UG;
 /*
     STEPPER_TIMER->ARR = (uint16_t)(cycles_per_tick - 1);
@@ -378,13 +378,71 @@ static void stepperPulseStartDelayed (stepper_t *stepper)
 
 #ifdef SPINDLE_SYNC_ENABLE
 
+    static float block_start;
+    static bool sync = false;
+    static stepper_t *stepper_to_sync;
+
+void CalculateFeedSynchronization() {
+        if(!stepper_to_sync->new_block) {  // adjust this segments total time for any positional error since last segment
+
+            float actual_pos;
+
+            if(stepper_to_sync->exec_segment->cruising) {
+
+                float dt = (float)hal.f_step_timer / (float)(stepper_to_sync->exec_segment->cycles_per_tick * stepper_to_sync->exec_segment->n_step);
+                actual_pos = spindleGetData(SpindleData_AngularPosition).angular_position * spindle_tracker.programmed_rate;
+
+                if(sync) {
+                    spindle_tracker.pid.sample_rate_prev = dt;
+//                    spindle_tracker.block_start += (actual_pos - spindle_tracker.block_start) - spindle_tracker.prev_pos;
+//                    spindle_tracker.block_start += spindle_tracker.prev_pos;
+                    sync = false;
+                }
+
+                actual_pos -= block_start;
+                int32_t step_delta = (int32_t)(pidf(&spindle_tracker.pid, spindle_tracker.prev_pos, actual_pos, dt) * spindle_tracker.steps_per_mm);
+
+
+                int32_t ticks = (((int32_t)stepper_to_sync->step_count + step_delta) * (int32_t)stepper_to_sync->exec_segment->cycles_per_tick) / (int32_t)stepper_to_sync->step_count;
+
+                // stepper->exec_segment->cycles_per_tick = (uint32_t)max(ticks, spindle_tracker.min_cycles_per_tick);
+//                ticks=max(ticks, spindle_tracker.min_cycles_per_tick);
+                ticks=max(ticks, 150L);// 500 mm/min at 800p/mm
+                ticks=min(ticks, (1UL << 30));
+                stepper_to_sync->exec_segment->cycles_per_tick = (uint32_t)ticks;
+
+                stepperCyclesPerTick(stepper_to_sync->exec_segment->cycles_per_tick);		// setting this value (actual speed) causes g33 to "crash"
+           } else
+               actual_pos = spindle_tracker.prev_pos;
+
+#ifdef PID_LOG
+            if(sys.pid_log.idx < PID_LOG) {
+
+                sys.pid_log.target[sys.pid_log.idx] = spindle_tracker.prev_pos;
+                sys.pid_log.actual[sys.pid_log.idx] = actual_pos; // - spindle_tracker.prev_pos;
+
+            //    spindle_tracker.log[sys.pid_log.idx] = STEPPER_TIMER->BGLOAD << stepper->amass_level;
+            //    spindle_tracker.pos[sys.pid_log.idx] = stepper->exec_segment->cycles_per_tick  stepper->amass_level;
+            //    spindle_tracker.pos[sys.pid_log.idx] = stepper->exec_segment->cycles_per_tick * stepper->step_count;
+            //    STEPPER_TIMER->BGLOAD = STEPPER_TIMER->LOAD;
+
+             //   spindle_tracker.pos[sys.pid_log.idx] = spindle_tracker.prev_pos;
+
+                sys.pid_log.idx++;
+            }
+#endif
+        }
+
+        spindle_tracker.prev_pos = stepper_to_sync->exec_segment->target_position;
+        hal.SynchronizeFeedRate=false; // signal all done
+}
 // Spindle sync version: sets stepper direction and pulse pins and starts a step pulse.
 // Switches back to "normal" version if spindle synchronized motion is finished.
 // TODO: add delayed pulse handling...
 static void stepperPulseStartSynchronized (stepper_t *stepper)
 {
-    static bool sync = false;
-    static float block_start;
+//    static bool sync = false;
+//    static float block_start;
 
     if(stepper->new_block) {
         if(!stepper->exec_segment->spindle_sync) {
@@ -413,55 +471,15 @@ static void stepperPulseStartSynchronized (stepper_t *stepper)
     }
 
     if(spindle_tracker.segment_id != stepper->exec_segment->id) {
-
         spindle_tracker.segment_id = stepper->exec_segment->id;
-
-        if(!stepper->new_block) {  // adjust this segments total time for any positional error since last segment
-
-            float actual_pos;
-
-            if(stepper->exec_segment->cruising) {
-
-                float dt = (float)hal.f_step_timer / (float)(stepper->exec_segment->cycles_per_tick * stepper->exec_segment->n_step);
-                actual_pos = spindleGetData(SpindleData_AngularPosition).angular_position * spindle_tracker.programmed_rate;
-
-                if(sync) {
-                    spindle_tracker.pid.sample_rate_prev = dt;
-//                    spindle_tracker.block_start += (actual_pos - spindle_tracker.block_start) - spindle_tracker.prev_pos;
-//                    spindle_tracker.block_start += spindle_tracker.prev_pos;
-                    sync = false;
-                }
-
-                actual_pos -= block_start;
-                int32_t step_delta = (int32_t)(pidf(&spindle_tracker.pid, spindle_tracker.prev_pos, actual_pos, dt) * spindle_tracker.steps_per_mm);
-
-
-                int32_t ticks = (((int32_t)stepper->step_count + step_delta) * (int32_t)stepper->exec_segment->cycles_per_tick) / (int32_t)stepper->step_count;
-
-                stepper->exec_segment->cycles_per_tick = (uint32_t)max(ticks, spindle_tracker.min_cycles_per_tick);
-
-                stepperCyclesPerTick(stepper->exec_segment->cycles_per_tick);
-           } else
-               actual_pos = spindle_tracker.prev_pos;
-
-#ifdef PID_LOG
-            if(sys.pid_log.idx < PID_LOG) {
-
-                sys.pid_log.target[sys.pid_log.idx] = spindle_tracker.prev_pos;
-                sys.pid_log.actual[sys.pid_log.idx] = actual_pos; // - spindle_tracker.prev_pos;
-
-            //    spindle_tracker.log[sys.pid_log.idx] = STEPPER_TIMER->BGLOAD << stepper->amass_level;
-            //    spindle_tracker.pos[sys.pid_log.idx] = stepper->exec_segment->cycles_per_tick  stepper->amass_level;
-            //    spindle_tracker.pos[sys.pid_log.idx] = stepper->exec_segment->cycles_per_tick * stepper->step_count;
-            //    STEPPER_TIMER->BGLOAD = STEPPER_TIMER->LOAD;
-
-             //   spindle_tracker.pos[sys.pid_log.idx] = spindle_tracker.prev_pos;
-
-                sys.pid_log.idx++;
-            }
-#endif
+        if(!stepper->new_block){
+        	if (hal.SynchronizeFeedRate==false)
+        	{
+          	  stepper_to_sync=stepper;
+         	  hal.SynchronizeFeedRate=true;
+//        	  CalculateFeedSynchronization();   moved to main thread
+        	}
         }
-
         spindle_tracker.prev_pos = stepper->exec_segment->target_position;
     }
 }
@@ -1463,6 +1481,9 @@ bool driver_init (void)
 #ifdef SPINDLE_SYNC_ENABLE
     hal.driver_cap.spindle_sync = On;
     hal.driver_cap.spindle_at_speed = On;
+    hal.CalculateFeedSynchronization=CalculateFeedSynchronization;
+    hal.SynchronizeFeedRate=false;
+
 #endif
 #ifdef COOLANT_MIST_PIN
     hal.driver_cap.mist_control = On;
@@ -1493,6 +1514,8 @@ bool driver_init (void)
 #if ODOMETER_ENABLE
     odometer_init(); // NOTE: this *must* be last plugin to be initialized as it claims storage at the end of NVS.
 #endif
+
+
 
     // No need to move version check before init.
     // Compiler will fail any signature mismatch for existing entries.

@@ -392,6 +392,13 @@ bool protocol_exec_rt_system ()
 {
     uint_fast16_t rt_exec;
 
+
+	if (hal.SynchronizeFeedRate==true)
+	{
+	  CalculateFeedSynchronization();
+	}
+
+
     if (sys_rt_exec_alarm && (rt_exec = system_clear_exec_alarm())) { // Enter only if any bit flag is true
 
         // System alarm. Everything has shutdown by something that has gone severely wrong. Report

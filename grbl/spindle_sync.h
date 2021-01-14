@@ -71,4 +71,7 @@ typedef struct {
 #endif
 } spindle_sync_t;
 
+typedef struct {
+} spindle_sync_calculate_t;
+
 #endif
