@@ -21,6 +21,8 @@
 
 #define HAS_BOARD_INIT
 #define SPINDLE_SYNC_ENABLE
+//#define FORE_GROUND_SYNCHRONIZATION is placed in config.h for the moment
+#define SYNCHRONIZATION_DAMPING_FACTOR 1.0f // 1 rotation. suitable for 400 mm/min at 25mm/s/s The higher the Z-axis acceleration and the lower the max threading speed, the lower this factor can be.
 
 void board_init (void);
 

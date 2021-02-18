@@ -33,7 +33,7 @@ typedef union {
                 pwm          :1, // NOTE: only used for PWM inversion setting
                 reserved3    :1,
                 reserved4    :1,
-                reserved5    :1,
+				synchronization_started    :1,
                 at_speed     :1,
                 synchronized :1;
     };

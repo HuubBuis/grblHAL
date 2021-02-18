@@ -276,12 +276,22 @@ bool plan_check_full_buffer ()
     return block_buffer_tail == next_buffer_head;
 }
 
-
 // Computes and returns block nominal speed based on running condition and override values.
 // NOTE: All system motion commands, such as homing/parking, are not subject to overrides.
 float plan_compute_profile_nominal_speed (plan_block_t *block)
 {
+#ifdef 	FOREGROUND_SYNCHRONIZATION
+float nominal_speed;
+	if (block->condition.spindle.synchronized) 													// if spindle sync mode
+		if (block->condition.spindle.synchronization_started)									// if synchronization started
+			nominal_speed = block->programmed_rate;												// use calculated feed rate when synchronization started
+		else
+			nominal_speed =block->programmed_rate * hal.spindle.get_data(SpindleData_RPM).rpm;	// use RPM until synchronization is started
+	else
+		nominal_speed = block->programmed_rate;													// normal feed rate
+#else
     float nominal_speed = block->condition.spindle.synchronized ? block->programmed_rate * hal.spindle.get_data(SpindleData_RPM).rpm : block->programmed_rate;
+#endif
 
     if (block->condition.rapid_motion)
         nominal_speed *= (0.01f * sys.override.rapid_rate);

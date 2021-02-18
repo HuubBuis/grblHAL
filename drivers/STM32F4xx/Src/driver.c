@@ -20,13 +20,14 @@
   along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
 
 */
-
+#include <stdio.h>
 #include <math.h>
 #include <string.h>
 
 #include "main.h"
 #include "driver.h"
 #include "serial.h"
+#include "protocol.h"
 
 #ifdef I2C_PORT
 #include "i2c.h"
@@ -212,6 +213,66 @@ static uint32_t dir_outmap[sizeof(c_dir_outmap) / sizeof(uint32_t)];
 
 #define DRIVER_IRQMASK (LIMIT_MASK|CONTROL_MASK|KEYPAD_STROBE_BIT|SPINDLE_INDEX_BIT)
 
+// foreground synchronization code
+
+char sbuf[128];                          // string buffer for reports
+
+typedef struct{
+	volatile float spindle_position;					// (mm) the position of the spindel expressed in required axis travel
+	volatile float axis_position;						// (mm) the postion of the axis to synchronize
+	volatile float synchronization_error;				// (mm) the feed between the required axis and actual axis position. A negative value means axis is behind
+	volatile float feed_per_encoder_pulse;				// (mm) the required feed between encoder pulses
+	volatile float synchronizations_per_rotation;		// 		the actual number of synchronization per rotation, depends on encoder pulses per rotation and tics per interrupt
+	volatile float feed_rate_requested;					// (mm/min) the calculated feed rate to be in sync at the next synchronization pulse
+	volatile float synchronization_damping_factor; 		// (rotations) the factor to dampen oscillations during threading synchronisation, defaults to 1 rotation
+	volatile float programmed_rate;						// 		the thread pitch
+	volatile float travel;								// (mm) the calculated travel to be in sync at the next encoder pulse
+	volatile uint32_t time;								// (us) the calculated time to be in sync at the next encoder pulse
+	volatile uint32_t synchronization_pulse_time;				// (us) the time at the current encoder pulse
+	volatile uint32_t previous_synchronization_pulse_time;		// (us) the time at the previous encoder pulse
+	volatile uint32_t encoder_pulse_count;		// 	    the number of pulse counts since the start
+	volatile uint32_t encoder_pulse_count_start;// 	    the number of pulse counts at the start
+	volatile uint32_t synchronization_count; 			//      the actual number of synchronizations that have taken place
+	volatile uint32_t step_count; 						//      the number of steps the stepper has done since start threading
+	volatile bool update_report;						//		signal an update report to avoid reporting the same data twice
+	volatile bool synchronization_enabled;
+	volatile bool synchronization_requested;
+	volatile bool new_block;						// true when starting a new synchronization block
+} synchronization_data_t;
+
+static synchronization_data_t synchronization_data;
+
+void driver_rt_report (stream_write_ptr stream_write, report_tracking_flags_t report)
+{
+	static bool report_final=false;
+	plan_block_t *block=plan_get_current_block();
+	if ((!block) || !block->condition.spindle.synchronized)
+		if (report_final) {
+	    sprintf(sbuf, "|Se:%s", ftoa(0,3));			// report a final zero synchronisation error, looks better in a ui
+	    stream_write(sbuf);
+	    report_final=false;
+	    return;
+		}
+	if(!synchronization_data.update_report) return;								// Nothing to report
+	synchronization_data_t tmpData;
+ 	uint32_t prim = __get_PRIMASK();											// Save the current interrupt status
+	 __disable_irq();															// Disable interrupts
+	memcpy(&tmpData,&synchronization_data,sizeof(synchronization_data_t));		// make a copy of the report data so it is not affected by updates
+	synchronization_data.update_report=false;									// avoid reporting the same data twice
+    if (!prim) __enable_irq();													// Enable irq if it was enabled before
+ //  when spindle synchronization is on and data was updated
+    if ((block) &&  (block->condition.spindle.synchronized = On) && tmpData.update_report) {  //  when spindle synchronization is on and data was updated
+#ifdef FOREGROUND_SYNCHRONIZATION
+    sprintf(sbuf, "|Sc:%s", uitoa(tmpData.synchronization_count));				// show the synchronization count for debugging purposes
+    stream_write(sbuf);
+#endif
+    sprintf(sbuf, "|Se:%s", ftoa(tmpData.synchronization_error,3));
+    stream_write(sbuf);
+    report_final=true;															// Report a zero final synchronization error
+    }
+}
+// foreground synchronization code end
+
 static void spindle_set_speed (uint_fast16_t pwm_value);
 
 static void driver_delay (uint32_t ms, void (*callback)(void))
@@ -377,7 +438,11 @@ static void stepperPulseStartDelayed (stepper_t *stepper)
 }
 
 #ifdef SPINDLE_SYNC_ENABLE
+// fore ground synchronization timing measurements (code not not optimized):
+// 9  us time between the fore ground request to process and the start of processing
+// 13 us time to process an encoder pulse
 
+#ifndef FOREGROUND_SYNCHRONIZATION   // use PID synchronization in interrupt time
 // Spindle sync version: sets stepper direction and pulse pins and starts a step pulse.
 // Switches back to "normal" version if spindle synchronized motion is finished.
 // TODO: add delayed pulse handling...
@@ -406,12 +471,6 @@ static void stepperPulseStartSynchronized (stepper_t *stepper)
 #endif
     }
 
-    if(stepper->step_outbits.value) {
-        stepperSetStepOutputs(stepper->step_outbits);
-        PULSE_TIMER->EGR = TIM_EGR_UG;
-        PULSE_TIMER->CR1 |= TIM_CR1_CEN;
-    }
-
     if(spindle_tracker.segment_id != stepper->exec_segment->id) {
 
         spindle_tracker.segment_id = stepper->exec_segment->id;
@@ -432,19 +491,20 @@ static void stepperPulseStartSynchronized (stepper_t *stepper)
                     sync = false;
                 }
 
-                actual_pos -= block_start;
+                actual_pos -= block_start;   													// Position of the Z-axis
+                synchronization_data.synchronization_error=actual_pos-spindle_tracker.prev_pos;	// calculate the synchronization error, needed for my gui
+                synchronization_data.update_report=true;										// signal to update the report
                 int32_t step_delta = (int32_t)(pidf(&spindle_tracker.pid, spindle_tracker.prev_pos, actual_pos, dt) * spindle_tracker.steps_per_mm);
-
 
                 int32_t ticks = (((int32_t)stepper->step_count + step_delta) * (int32_t)stepper->exec_segment->cycles_per_tick) / (int32_t)stepper->step_count;
 
-                stepper->exec_segment->cycles_per_tick = (uint32_t)max(ticks, spindle_tracker.min_cycles_per_tick);
+                stepper->exec_segment->cycles_per_tick = (uint32_t)max(ticks, 200);  // min ticks required to process this routine
+            	stepperCyclesPerTick(stepper->exec_segment->cycles_per_tick);		// set the new feedrate by changing the step timing
 
-                stepperCyclesPerTick(stepper->exec_segment->cycles_per_tick);
            } else
                actual_pos = spindle_tracker.prev_pos;
 
-#ifdef PID_LOG
+    #ifdef PID_LOG
             if(sys.pid_log.idx < PID_LOG) {
 
                 sys.pid_log.target[sys.pid_log.idx] = spindle_tracker.prev_pos;
@@ -460,13 +520,112 @@ static void stepperPulseStartSynchronized (stepper_t *stepper)
                 sys.pid_log.idx++;
             }
 #endif
+
         }
 
         spindle_tracker.prev_pos = stepper->exec_segment->target_position;
     }
+    if(stepper->step_outbits.value) {
+        stepperSetStepOutputs(stepper->step_outbits);
+        PULSE_TIMER->EGR = TIM_EGR_UG;
+        PULSE_TIMER->CR1 |= TIM_CR1_CEN;
+    }
 }
 
+#else
+
+static void setFeedRate(float NewFeedRate) { //update the feed rate using the planner
+	plan_block_t *block;
+	if ((block = plan_get_current_block())) {
+		block->programmed_rate = NewFeedRate;
+		plan_update_velocity_profile_parameters();
+		plan_cycle_reinitialize();
+	}
+}
+static void coolantSetState (coolant_state_t mode);
+static void Signal(bool level)
+{
+	coolant_state_t cs= {.value=level};
+	coolantSetState(cs);
+}
+// calculates the requested feed rate to be in sync at the next encoder pulse
+static void SynchronizeFeedRate(synchronization_data_t *synchronization_data)
+{
+	// values needed:
+	//synchronization_data->spindle_position  the current position
+	//synchronization_data->axis_position
+	//synchronization_data->time
+
+	synchronization_data->synchronization_error=synchronization_data->axis_position-synchronization_data->spindle_position;		// The synchronization error, negative means axis is behind.
+	synchronization_data->travel=(synchronization_data->feed_per_encoder_pulse*synchronization_data->synchronization_damping_factor)-synchronization_data->synchronization_error;	 	// The required axis move to be in sync at the next pulse.
+	synchronization_data->time=(synchronization_data->synchronization_pulse_time-synchronization_data->previous_synchronization_pulse_time)*synchronization_data->synchronization_damping_factor/((float)spindle_encoder.counter.tics_per_irq);		// The time until then next pulse, assuming the RPM is the same
+
+	synchronization_data->feed_rate_requested=synchronization_data->travel/((float)synchronization_data->time)*((float)60000000.0f);		// the required feed rate in mm/min
+	synchronization_data->feed_rate_requested=min(synchronization_data->feed_rate_requested,settings.axis[Z_AXIS].max_rate);
+	synchronization_data->feed_rate_requested=max(synchronization_data->feed_rate_requested,1);
+	setFeedRate(synchronization_data->feed_rate_requested);
+}
+
+
+// Synchronizes the feed rate, can be called in fore ground or by the encoder pulse interrupt
+static void stepperPulseSynchronizeFeedRateQued()
+{
+//	Signal(true);																					// for timing the duration of processing,   13 us, 40 us without FPU
+	if(synchronization_data.new_block){																// at the start of a block
+        synchronization_data.encoder_pulse_count_start=synchronization_data.encoder_pulse_count;	// set the start position Spindle to the next
+        synchronization_data.step_count=0;															// set the start position Z
+        synchronization_data.synchronizations_per_rotation=(((float)settings.spindle.ppr)/((float)spindle_encoder.counter.tics_per_irq));
+		synchronization_data.feed_per_encoder_pulse=synchronization_data.programmed_rate/((float)spindle_encoder.ppr);
+        synchronization_data.synchronization_count=0;												// set the synchronization counter to zero
+		synchronization_data.new_block=false;
+		synchronization_data.synchronization_damping_factor=((float)spindle_encoder.ppr)*SYNCHRONIZATION_DAMPING_FACTOR;
+#ifdef PID_LOG
+        sys.pid_log.idx = 0;																		// prepare logging
+        sys.pid_log.setpoint = 100.0f;
 #endif
+    }
+	synchronization_data.spindle_position=((float)(synchronization_data.encoder_pulse_count-synchronization_data.encoder_pulse_count_start))*synchronization_data.feed_per_encoder_pulse;
+	synchronization_data.axis_position=((float) synchronization_data.step_count)/settings.axis[Z_AXIS].steps_per_mm;
+   	SynchronizeFeedRate(&synchronization_data);				// calculate the feedrate to synchronize and update planner
+   	synchronization_data.synchronization_count++;			// count the synchronizations, helps when tuning settings
+   	synchronization_data.update_report=true;				// signal a new report is valid
+#ifdef PID_LOG												// log the data
+  	if(sys.pid_log.idx < PID_LOG) {
+  		sys.pid_log.target[sys.pid_log.idx] = synchronization_data.spindle_position;
+  		sys.pid_log.actual[sys.pid_log.idx] = synchronization_data.axis_position;
+  		sys.pid_log.idx++;
+  	}
+#endif
+	synchronization_data.synchronization_requested=false; //signal that a new synchronization can start
+//	Signal(false);  // pulse width is used for timing duration of processing
+}
+
+static void stepperPulseStartSynchronized (stepper_t *stepper)  // qued
+{
+    if(stepper->new_block) {
+        if(!stepper->exec_segment->spindle_sync) {
+            hal.stepper.pulse_start = spindle_tracker.stepper_pulse_start_normal;
+            hal.stepper.pulse_start(stepper);
+            return;
+        }
+        // setup stepping, logging and processing
+        stepperSetDirOutputs(stepper->dir_outbits);													// set the direction
+    	synchronization_data.programmed_rate = stepper->exec_block->programmed_rate;				// set the synchronization rate
+        synchronization_data.new_block=true;														// signal the start of a new block
+        synchronization_data.synchronization_requested=false;										// signal no pending synchronizations
+    }
+    if(stepper->step_outbits.value) {
+        stepperSetStepOutputs(stepper->step_outbits);
+        PULSE_TIMER->EGR = TIM_EGR_UG;
+        PULSE_TIMER->CR1 |= TIM_CR1_CEN;
+        synchronization_data.step_count++; //count the steps to calculate the z-axis position
+    }
+	synchronization_data.synchronization_enabled =true;												// signal synchronization active
+}
+
+#endif	//FOREGROUND_SYNCHRONIZATION
+
+#endif	//SPINDLE_SYNC_ENABLE
 
 // Enable/disable limit pins interrupt
 static void limitsEnable (bool on, bool homing)
@@ -698,25 +857,26 @@ static void spindlePulseOn (uint_fast16_t pulse_length)
 
 #endif
 
+
 #ifdef SPINDLE_SYNC_ENABLE
 
 static spindle_data_t spindleGetData (spindle_data_request_t request)
 {
     bool stopped;
-    uint32_t pulse_length = spindle_encoder.timer.pulse_length / spindle_encoder.counter.tics_per_irq;
 
+    uint32_t pulse_length = spindle_encoder.timer.pulse_length / spindle_encoder.counter.tics_per_irq;
     uint32_t rpm_timer_delta = RPM_TIMER->CNT - spindle_encoder.timer.last_pulse;
 
     // If no (4) spindle pulses during last 250 ms assume RPM is 0
     if((stopped = ((pulse_length == 0) || (rpm_timer_delta > spindle_encoder.maximum_tt)))) {
         spindle_data.rpm = 0.0f;
-        rpm_timer_delta = ((uint16_t)RPM_COUNTER->CNT - (uint16_t)spindle_encoder.counter.last_count) * pulse_length;
+        rpm_timer_delta = (RPM_COUNTER->CNT - spindle_encoder.counter.last_count) * pulse_length;
     }
 
     switch(request) {
 
         case SpindleData_Counters:
-            spindle_data.pulse_count += (uint16_t)RPM_COUNTER->CNT - (uint16_t)spindle_encoder.counter.last_count;
+            spindle_data.pulse_count += RPM_COUNTER->CNT - spindle_encoder.counter.last_count;
             break;
 
         case SpindleData_RPM:
@@ -726,12 +886,13 @@ static spindle_data_t spindleGetData (spindle_data_request_t request)
 
         case SpindleData_AngularPosition:
             spindle_data.angular_position = (float)spindle_data.index_count +
-                    ((float)((uint16_t)spindle_encoder.counter.last_count - (uint16_t)spindle_encoder.counter.last_index) +
+                    ((float)(spindle_encoder.counter.last_count - spindle_encoder.counter.last_index) +
                               (pulse_length == 0 ? 0.0f : (float)rpm_timer_delta / (float)pulse_length)) *
                                 spindle_encoder.pulse_distance;
             break;
     }
 
+//    enableIRQ(state);
     return spindle_data;
 }
 
@@ -929,9 +1090,9 @@ void settings_changed (settings_t *settings)
 
             spindle_tracker.min_cycles_per_tick = (int32_t)ceilf(settings->steppers.pulse_microseconds * 2.0f + settings->steppers.pulse_delay_microseconds);
             spindle_encoder.ppr = settings->spindle.ppr;
-            spindle_encoder.counter.tics_per_irq = 4;
+            spindle_encoder.counter.tics_per_irq = 1;
             spindle_encoder.pulse_distance = 1.0f / spindle_encoder.ppr;
-            spindle_encoder.maximum_tt = (uint32_t)(0.25f / timer_resolution) * spindle_encoder.counter.tics_per_irq; // 250 mS
+            spindle_encoder.maximum_tt = (uint32_t)(1.5f / timer_resolution) * spindle_encoder.counter.tics_per_irq; // 1500 ms, 10 RPM
             spindle_encoder.rpm_factor = 60.0f / ((timer_resolution * (float)spindle_encoder.ppr));
             spindleDataReset();
             //        spindle_data.rpm = 60.0f / ((float)(spindle_encoder.tpp * spindle_encoder.ppr) * spindle_encoder.timer_resolution); // TODO: get rid of division
@@ -1328,7 +1489,7 @@ static bool driver_setup (settings_t *settings)
 
     GPIO_Init.Mode = GPIO_MODE_AF_PP;
     GPIO_Init.Pin = SPINDLE_PULSE_BIT;
-    GPIO_Init.Pull = GPIO_NOPULL;
+    GPIO_Init.Pull = GPIO_PULLUP;
     GPIO_Init.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_Init.Alternate = GPIO_AF2_TIM3;
     HAL_GPIO_Init(SPINDLE_PULSE_PORT, &GPIO_Init);
@@ -1462,6 +1623,7 @@ bool driver_init (void)
 #ifdef SPINDLE_SYNC_ENABLE
     hal.driver_cap.spindle_sync = On;
     hal.driver_cap.spindle_at_speed = On;
+    grbl.on_realtime_report= driver_rt_report ;
 #endif
 #ifdef COOLANT_MIST_PIN
     hal.driver_cap.mist_control = On;
@@ -1571,18 +1733,36 @@ void PPI_TIMER_IRQHandler (void)
 void RPM_COUNTER_IRQHandler (void)
 {
     uint32_t tval = RPM_TIMER->CNT;
-    uint16_t cval = RPM_COUNTER->CNT;
+    uint32_t cval = RPM_COUNTER->CNT;
 
     RPM_COUNTER->SR = ~TIM_SR_CC1IF;
     RPM_COUNTER->CCR1 += spindle_encoder.counter.tics_per_irq;
 
-    spindle_data.pulse_count += cval - (uint16_t)spindle_encoder.counter.last_count;
+    // The next values must be read atomic because te stepper interrupt has a higher interrupt priority and needs the angular position.
+ 	uint32_t prim = __get_PRIMASK();	// Save the current interrupt status
+	 __disable_irq();					// Disable interrupts
 
+	 //set the data for spindleGetData()
+    spindle_data.pulse_count += cval - spindle_encoder.counter.last_count;
     spindle_encoder.counter.last_count = cval;
     spindle_encoder.timer.pulse_length = tval - spindle_encoder.timer.last_pulse;
     spindle_encoder.timer.last_pulse = tval;
-}
 
+#ifdef FOREGROUND_SYNCHRONIZATION
+    // set the data for foreground spindle synchronization
+	synchronization_data.previous_synchronization_pulse_time = synchronization_data.synchronization_pulse_time;
+	synchronization_data.synchronization_pulse_time = tval;
+	synchronization_data.encoder_pulse_count = cval;
+
+
+	if (synchronization_data.synchronization_enabled == true) {
+//		stepperPulseSynchronizeFeedRateQued(); // synchronize in interrupt time
+			synchronization_data.synchronization_requested = protocol_enqueue_rt_command(&stepperPulseSynchronizeFeedRateQued); // if que filled, try again next pulse
+		}
+	synchronization_data.synchronization_enabled =false; // must be set every stepper pulse
+#endif
+    if (!prim) __enable_irq();			// Enable irq if it was enabled before
+}
 #endif
 
 #if DRIVER_IRQMASK & (1<<0)

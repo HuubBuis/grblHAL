@@ -57,28 +57,28 @@ typedef struct st_block {
 } st_block_t;
 
 typedef struct st_segment {
-    uint_fast8_t id;                // Id may be used by driver to track changes
-    struct st_segment *next;        // Pointer to next element in cirular list of segments
-    st_block_t *exec_block;         // Pointer to the block data for the segment
-    uint32_t cycles_per_tick;       // Step distance traveled per ISR tick, aka step rate.
-    float current_rate;
-    float target_position;          // Target position of segment relative to block start, used by spindle sync code
-    uint_fast16_t n_step;           // Number of step events to be executed for this segment
+	volatile uint_fast8_t id;                // Id may be used by driver to track changes
+	struct st_segment *next;        // Pointer to next element in cirular list of segments
+    volatile st_block_t *exec_block;         // Pointer to the block data for the segment
+    volatile uint32_t cycles_per_tick;       // Step distance traveled per ISR tick, aka step rate.
+    volatile float current_rate;
+    volatile float target_position;          // Target position of segment relative to block start, used by spindle sync code
+    volatile uint_fast16_t n_step;           // Number of step events to be executed for this segment
 #ifdef SPINDLE_PWM_DIRECT
-    uint_fast16_t spindle_pwm;      // Spindle PWM to be set at the start of segment execution
+    volatile uint_fast16_t spindle_pwm;      // Spindle PWM to be set at the start of segment execution
 #else
     float spindle_rpm;              // Spindle RPM to be set at the start of the segment execution
 #endif
-    bool update_rpm;                // True if set spindle speed at the start of the segment execution
-    bool spindle_sync;              // True if block is spindle synchronized
-    bool cruising;                  // True when in cruising part of profile, only set for spindle synced moves
-    uint_fast8_t amass_level;       // Indicates AMASS level for the ISR to execute this segment
+    volatile bool update_rpm;                // True if set spindle speed at the start of the segment execution
+    volatile bool spindle_sync;              // True if block is spindle synchronized
+    volatile bool cruising;                  // True when in cruising part of profile, only set for spindle synced moves
+    volatile uint_fast8_t amass_level;       // Indicates AMASS level for the ISR to execute this segment
 } segment_t;
 
 // Stepper ISR data struct. Contains the running data for the main stepper ISR.
 typedef struct {
     // Used by the bresenham line algorithm
-    uint32_t counter_x,        // Counter variables for the bresenham line tracer
+	volatile uint32_t counter_x,        // Counter variables for the bresenham line tracer
              counter_y,
              counter_z
     #ifdef A_AXIS
@@ -91,17 +91,17 @@ typedef struct {
           , counter_c
     #endif
 ;
-    bool new_block;                 // Set to true when a new block is started, might be used by driver for advanced functionality
-    bool dir_change;                // Set to true on direction changes, might be used by driver for advanced functionality
-    axes_signals_t step_outbits;    // The next stepping-bits to be output
-    axes_signals_t dir_outbits;     // The next direction-bits to be output
-    uint32_t steps[N_AXIS];
-    uint_fast8_t amass_level;       // AMASS level for this segment
+    volatile bool new_block;                 // Set to true when a new block is started, might be used by driver for advanced functionality
+    volatile bool dir_change;                // Set to true on direction changes, might be used by driver for advanced functionality
+    volatile axes_signals_t step_outbits;    // The next stepping-bits to be output
+    volatile axes_signals_t dir_outbits;     // The next direction-bits to be output
+    volatile uint32_t steps[N_AXIS];
+    volatile uint_fast8_t amass_level;       // AMASS level for this segment
 //    uint_fast16_t spindle_pwm;
-    uint_fast16_t step_count;       // Steps remaining in line segment motion
-    uint32_t step_event_count;
-    st_block_t *exec_block;         // Pointer to the block data for the segment being executed
-    segment_t *exec_segment;        // Pointer to the segment being executed
+    volatile uint_fast16_t step_count;       // Steps remaining in line segment motion
+    volatile uint32_t step_event_count;
+    volatile st_block_t *exec_block;         // Pointer to the block data for the segment being executed
+    volatile segment_t *exec_segment;        // Pointer to the segment being executed
 } stepper_t;
 
 // Initialize and setup the stepper motor subsystem

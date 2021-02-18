@@ -157,6 +157,8 @@ void set_state (uint_fast16_t new_state)
                         st_prep_buffer();                   // Initialize step segment buffer before beginning cycle.
                         if(block->condition.spindle.synchronized) {
 
+                        	block->condition.spindle.synchronization_started = true;	// signal to calculate the start speed  based on RPM, allowing faster synchronization
+
                             if(hal.spindle.reset_data)
                                 hal.spindle.reset_data();
 

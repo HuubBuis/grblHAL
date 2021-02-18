@@ -48,7 +48,7 @@ typedef enum {
 typedef union {
     uint8_t flags;
     struct {
-        uint8_t velocity_profile   :1,
+    	volatile uint8_t velocity_profile   :1,
                 hold_partial_block :1,
                 parking            :1,
                 decel_override     :1,
@@ -87,11 +87,11 @@ static amass_t amass;
 static char *message = NULL; // TODO: do we need a queue for this?
 
 // Stepper timer ticks per minute
-static float cycles_per_min;
+volatile static float cycles_per_min;
 
 // Step segment ring buffer indices
-static volatile segment_t *segment_buffer_tail;
-static segment_t *segment_buffer_head, *segment_next_head;
+static  segment_t *segment_buffer_tail;
+static  segment_t *segment_buffer_head, *segment_next_head;
 
 // Pointers for the step segment being prepped from the planner buffer. Accessed only by the
 // main program. Pointers may be planning segments or planner blocks ahead of what being executed.

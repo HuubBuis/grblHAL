@@ -440,7 +440,8 @@
 #endif
 
 // Max number of entries in log for PID data reporting, to be used for tuning
-//#define PID_LOG 1000 // Default disabled. Uncomment to enable.
+#define PID_LOG 1000 // Default disabled. Uncomment to enable.
+#define FOREGROUND_SYNCHRONIZATION // should be in board or driver definition file but that is included at a to late point, so placed here for now
 
 //#define DEFAULT_NO_REPORT_BUFFER_STATE
 //#define DEFAULT_NO_REPORT_LINE_NUMBERS
